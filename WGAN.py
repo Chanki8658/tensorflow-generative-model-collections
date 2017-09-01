@@ -19,7 +19,7 @@ class WGAN(object):
         self.batch_size = batch_size
         self.model_name = "WGAN"     # name for checkpoint
 
-        if dataset_name == 'mnist' or 'fashion-mnist':
+        if dataset_name == 'mnist' or dataset_name == 'fashion-mnist':
             # parameters
             self.input_height = 28
             self.input_width = 28
@@ -28,6 +28,9 @@ class WGAN(object):
 
             self.z_dim = 62         # dimension of noise-vector
             self.c_dim = 1
+
+            # WGAN parameter
+            self.disc_iters = 1     # The number of critic iterations for one-step of generator
 
             # train
             self.learning_rate = 0.0002
@@ -176,8 +179,9 @@ class WGAN(object):
                 self.writer.add_summary(summary_str, counter)
 
                 # update G network
-                _, summary_str, g_loss = self.sess.run([self.g_optim, self.g_sum, self.g_loss], feed_dict={self.inputs: batch_images, self.z: batch_z})
-                self.writer.add_summary(summary_str, counter)
+                if (counter - 1) % self.disc_iters == 0:
+                    _, summary_str, g_loss = self.sess.run([self.g_optim, self.g_sum, self.g_loss], feed_dict={self.inputs: batch_images, self.z: batch_z})
+                    self.writer.add_summary(summary_str, counter)
 
                 # display training status
                 counter += 1

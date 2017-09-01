@@ -8,7 +8,7 @@ import numpy as np
 from ops import *
 from utils import *
 
-class DRAGAN(object):
+class WGAN_GP(object):
     def __init__(self, sess, epoch, batch_size, dataset_name, checkpoint_dir, result_dir, log_dir):
         self.sess = sess
         self.dataset_name = dataset_name
@@ -17,7 +17,7 @@ class DRAGAN(object):
         self.log_dir = log_dir
         self.epoch = epoch
         self.batch_size = batch_size
-        self.model_name = "DRAGAN"     # name for checkpoint
+        self.model_name = "WGAN-GP"     # name for checkpoint
 
         if dataset_name == 'mnist' or dataset_name == 'fashion-mnist':
             # parameters
@@ -29,8 +29,9 @@ class DRAGAN(object):
             self.z_dim = 62         # dimension of noise-vector
             self.c_dim = 1
 
-            # DRAGAN parameter
+            # WGAN_GP parameter
             self.lambd = 0.25       # The higher value, the more stable, but the slower convergence
+            self.disc_iters = 1     # The number of critic iterations for one-step of generator
 
             # train
             self.learning_rate = 0.0002
@@ -76,9 +77,6 @@ class DRAGAN(object):
 
             return out
 
-    def get_perturbed_batch(self, minibatch):
-        return minibatch + 0.5 * minibatch.std() * np.random.random(minibatch.shape)
-
     def build_model(self):
         # some parameters
         image_dims = [self.input_height, self.input_width, self.c_dim]
@@ -87,7 +85,6 @@ class DRAGAN(object):
         """ Graph Input """
         # images
         self.inputs = tf.placeholder(tf.float32, [bs] + image_dims, name='real_images')
-        self.inputs_p = tf.placeholder(tf.float32, [bs] + image_dims, name='real_perturbed_images')
 
         # noises
         self.z = tf.placeholder(tf.float32, [bs, self.z_dim], name='z')
@@ -102,21 +99,18 @@ class DRAGAN(object):
         D_fake, D_fake_logits, _ = self.discriminator(G, is_training=True, reuse=True)
 
         # get loss for discriminator
-        d_loss_real = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_real_logits, labels=tf.ones_like(D_real)))
-        d_loss_fake = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.zeros_like(D_fake)))
+        d_loss_real = - tf.reduce_mean(D_real)
+        d_loss_fake = tf.reduce_mean(D_fake)
 
         self.d_loss = d_loss_real + d_loss_fake
 
         # get loss for generator
-        self.g_loss = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.ones_like(D_fake)))
+        self.g_loss = - d_loss_fake
 
-        """ DRAGAN Loss (Gradient penalty) """
+        """ Gradient Penalty """
         # This is borrowed from https://github.com/kodalinaveen3/DRAGAN/blob/master/DRAGAN.ipynb
         alpha = tf.random_uniform(shape=self.inputs.get_shape(), minval=0.,maxval=1.)
-        differences = self.inputs_p - self.inputs  # This is different from WGAN-GP
+        differences = G - self.inputs # This is different from MAGAN
         interpolates = self.inputs + (alpha * differences)
         D_inter,_,_=self.discriminator(interpolates, is_training=True, reuse=True)
         gradients = tf.gradients(D_inter, [interpolates])[0]
@@ -132,7 +126,7 @@ class DRAGAN(object):
 
         # optimizers
         with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
-            self.d_optim = tf.train.AdamOptimizer(self.learning_rate*5, beta1=self.beta1) \
+            self.d_optim = tf.train.AdamOptimizer(self.learning_rate, beta1=self.beta1) \
                       .minimize(self.d_loss, var_list=d_vars)
             self.g_optim = tf.train.AdamOptimizer(self.learning_rate*5, beta1=self.beta1) \
                       .minimize(self.g_loss, var_list=g_vars)
@@ -186,27 +180,29 @@ class DRAGAN(object):
             # get batch data
             for idx in range(start_batch_id, self.num_batches):
                 batch_images = self.data_X[idx*self.batch_size:(idx+1)*self.batch_size]
-                batch_images_p = self.get_perturbed_batch(batch_images)
                 batch_z = np.random.uniform(-1, 1, [self.batch_size, self.z_dim]).astype(np.float32)
 
                 # update D network
                 _, summary_str, d_loss = self.sess.run([self.d_optim, self.d_sum, self.d_loss],
-                                               feed_dict={self.inputs: batch_images, self.inputs_p: batch_images_p, self.z: batch_z})
+                                               feed_dict={self.inputs: batch_images, self.z: batch_z})
                 self.writer.add_summary(summary_str, counter)
 
                 # update G network
-                _, summary_str, g_loss = self.sess.run([self.g_optim, self.g_sum, self.g_loss], feed_dict={self.inputs: batch_images, self.inputs_p: batch_images_p, self.z: batch_z})
-                self.writer.add_summary(summary_str, counter)
+                if (counter-1) % self.disc_iters == 0:
+                    batch_z = np.random.uniform(-1, 1, [self.batch_size, self.z_dim]).astype(np.float32)
+                    _, summary_str, g_loss = self.sess.run([self.g_optim, self.g_sum, self.g_loss], feed_dict={self.inputs: batch_images, self.z: batch_z})
+                    self.writer.add_summary(summary_str, counter)
+
+                counter += 1
 
                 # display training status
-                counter += 1
                 print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                       % (epoch, idx, self.num_batches, time.time() - start_time, d_loss, g_loss))
 
                 # save training results for every 300 steps
                 if np.mod(counter, 300) == 0:
                     samples = self.sess.run(self.fake_images,
-                                            feed_dict={self.z: self.sample_z, self.inputs: self.test_images, self.inputs_p: self.test_images})
+                                            feed_dict={self.z: self.sample_z, self.inputs: self.test_images})
                     tot_num_samples = min(self.sample_num, self.batch_size)
                     manifold_h = int(np.floor(np.sqrt(tot_num_samples)))
                     manifold_w = int(np.floor(np.sqrt(tot_num_samples)))
